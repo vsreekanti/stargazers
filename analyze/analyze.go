@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/go-github/v45/github"
 	"github.com/spencerkimball/stargazers/fetch"
 )
 
@@ -85,7 +86,7 @@ func (slice RepoCounts) Swap(i, j int) {
 }
 
 // RunAll runs all analyses.
-func RunAll(c *fetch.Context, sg []*fetch.Stargazer, rs map[string]*fetch.Repo) error {
+func RunAll(c *fetch.Context, sg []*fetch.Stargazer, rs map[string]*fetch.Repo, commits []*github.RepositoryCommit, issues []*fetch.IssueComment) error {
 	if err := RunCumulativeStars(c, sg); err != nil {
 		return err
 	}
@@ -104,6 +105,185 @@ func RunAll(c *fetch.Context, sg []*fetch.Stargazer, rs map[string]*fetch.Repo) 
 	if err := RunAttributesByTime(c, sg, rs); err != nil {
 		return err
 	}
+	if err := RunCommits(c, commits); err != nil {
+		return err
+	}
+	if err := RunIssues(c, issues); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func RunCommits(c *fetch.Context, commits []*github.RepositoryCommit) error {
+	log.Printf("running all committers analysis")
+
+	// Create a map to track how many different users committed in any given
+	// month. The top level map is keyed on the month, and each value is map that
+	// functions as a set.
+	committersByMonth := map[string](*map[string]bool){}
+
+	for _, commit := range commits {
+		date := commit.Commit.Author.Date
+		monthKey := fmt.Sprintf("%d-%d", date.Year(), date.Month())
+
+		// Check if we've previously logged a commit in this month. If we haven't,
+		// create a login.
+		monthMap, ok := committersByMonth[monthKey]
+		if !ok {
+			monthMap = &map[string]bool{}
+			committersByMonth[monthKey] = monthMap
+		}
+
+		// In both maps, just blindly insert the user to the map -- even if we've
+		// inserted it before, it doesn't matter since we just mark it as true.
+		(*monthMap)[*commit.Author.Login] = true
+	}
+
+	now := time.Now()
+	// Go's very nitpicky about these types, but these are just typecasts over
+	// int. Unclear if there are any typesafety issues with this?
+	endYear := int(now.Year())
+	endMonth := int(now.Month())
+
+	// TODO(vikram): Make this a paramter. Currently hardcoded to when Aqueduct
+	// was released.
+	year := 2022
+	month := 5
+
+	// Set up the CSV that we're going to write the results to.
+	f, err := createFile(c, "cumulative_commmitters.csv")
+	if err != nil {
+		return fmt.Errorf("failed to create file: %s", err)
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	if err := w.Write([]string{"Month", "Total", "Cumulative"}); err != nil {
+		return fmt.Errorf("failed to write to CSV: %s", err)
+	}
+
+	allCommitters := map[string]bool{}
+	for year <= endYear && month <= endMonth {
+		// TODO(vikram): Is it better to keep this as a string or to store it as a
+		// datetime? The latter I think will make it hard for grouping, which is
+		// why its currently a string.
+		key := fmt.Sprintf("%d-%d", year, month)
+		monthCommitters, ok := committersByMonth[key]
+
+		// Increment the month we're on and check if we've rolled over to the next
+		// year. We do this before the potential continue call below to avoid
+		// infinite loops.
+		month += 1
+		if month > 12 {
+			month = 1
+			year += 1
+		}
+
+		if !ok { // There were no committers this month. Unlikely but just in case?
+			continue
+		}
+
+		for committer := range *monthCommitters {
+			// We can blindly add it to the map. It doesn't matter if we re-add
+			// because it just sets the value in the map to `true` again.
+			allCommitters[committer] = true
+		}
+
+		row := []string{key, fmt.Sprintf("%d", len(*monthCommitters)), fmt.Sprintf("%d", len(allCommitters))}
+		if err := w.Write(row); err != nil {
+			return fmt.Errorf("failed to write to CSV: %s", err)
+		}
+	}
+	w.Flush()
+
+	log.Printf("wrote cumulative committers analysis to %s", f.Name())
+	return nil
+}
+
+func RunIssues(c *fetch.Context, issues []*fetch.IssueComment) error {
+	log.Printf("running all issues analysis")
+
+	// Create a map to track how many unique users have commented on issues in
+	// any given month.
+	commentersByMonth := map[string](*map[string]bool){}
+
+	for _, issueComment := range issues {
+		monthKey := fmt.Sprintf("%d-%d", issueComment.Date.Year(), issueComment.Date.Month())
+
+		monthMap, ok := commentersByMonth[monthKey]
+		if !ok {
+			monthMap = &map[string]bool{}
+			commentersByMonth[monthKey] = monthMap
+		}
+
+		// As with the above, we can blindly insert this into the map because we
+		// just mark it as true even if one person has commented more than once.
+		(*monthMap)[issueComment.Author] = true
+	}
+
+	now := time.Now()
+	// Go's very nitpicky about these types, but these are just typecasts over
+	// int. Unclear if there are any typesafety issues with this?
+	endYear := int(now.Year())
+	endMonth := int(now.Month())
+
+	// TODO(vikram): Make this a paramter. Currently hardcoded to when Aqueduct
+	// was released.
+	year := 2022
+	month := 5
+
+	// Set up the CSV that we're going to write the results to.
+	f, err := createFile(c, "cumulative_commmenters.csv")
+	if err != nil {
+		return fmt.Errorf("failed to create file: %s", err)
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	if err := w.Write([]string{"Month", "Total", "Cumulative"}); err != nil {
+		return fmt.Errorf("failed to write to CSV: %s", err)
+	}
+
+	// TODO(vikram): This logic is basically the same as the logic above for
+	// committers. If we just distill this down to pulling out the user data from
+	// the structs, this can probably go into a helper function and be deduped.
+	allCommenters := map[string]bool{}
+	for year <= endYear && month <= endMonth {
+		// TODO(vikram): Is it better to keep this as a string or to store it as a
+		// datetime? The latter I think will make it hard for grouping, which is
+		// why its currently a string.
+		key := fmt.Sprintf("%d-%d", year, month)
+		monthCommenters, ok := commentersByMonth[key]
+
+		// Increment the month we're on and check if we've rolled over to the next
+		// year. We do this before we check if there are any commenters to avoid
+		// infinite loops.
+		month += 1
+		if month > 12 {
+			month = 1
+			year += 1
+		}
+
+		if !ok { // There were no commenters this month. Unlikely but just in case?
+			continue
+		}
+
+		for commenter := range *monthCommenters {
+			// We can blindly add it to the map. It doesn't matter if we re-add
+			// because it just sets the value in the map to `true` again.
+			allCommenters[commenter] = true
+		}
+
+		row := []string{key, fmt.Sprintf("%d", len(*monthCommenters)), fmt.Sprintf("%d", len(allCommenters))}
+		if err := w.Write(row); err != nil {
+			return fmt.Errorf("failed to write to CSV: %s", err)
+		}
+
+	}
+	w.Flush()
+
+	log.Printf("wrote cumulative commenters analysis to %s", f.Name())
 	return nil
 }
 

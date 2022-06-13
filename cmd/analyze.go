@@ -25,6 +25,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// TODO(vikram): Update this to reflect the changes made to analyze committers
+// and commenters as well.
 // AnalyzeCmd analyzes previously fetched GitHub stargazer data.
 var AnalyzeCmd = &cobra.Command{
 	Use:   "analyze --repo=:owner/:repo",
@@ -56,13 +58,13 @@ func RunAnalyze(cmd *cobra.Command, args []string) error {
 		Repo:     Repo,
 		CacheDir: CacheDir,
 	}
-	sg, rs, err := fetch.LoadState(fetchCtx)
+	sg, rs, commits, issues, err := fetch.LoadState(fetchCtx)
 	if err != nil {
 		log.Printf("failed to load saved stargazer data: %s", err)
 		return nil
 	}
 	log.Printf("analyzing GitHub data for repository %s", Repo)
-	if err := analyze.RunAll(fetchCtx, sg, rs); err != nil {
+	if err := analyze.RunAll(fetchCtx, sg, rs, commits, issues); err != nil {
 		log.Printf("failed to query stargazer data: %s", err)
 		return nil
 	}

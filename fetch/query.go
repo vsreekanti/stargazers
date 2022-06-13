@@ -17,6 +17,7 @@
 package fetch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/go-github/v45/github"
+	"golang.org/x/oauth2"
 )
 
 // TODO(spencer): this would all benefit from using a GitHub API
@@ -119,6 +123,12 @@ type Contributor struct {
 	Author User   `json:"author"`
 	Total  int    `json:"total"`
 	Weeks  []Week `json:"weeks"`
+}
+
+type IssueComment struct {
+	Author  string     `json:"author"`
+	IssueId int        `json:"issueId"`
+	Date    *time.Time `json:"date"`
 }
 
 type Repo struct {
@@ -230,7 +240,6 @@ func QueryAll(c *Context) error {
 	if err = QueryFollowers(c, sg); err != nil {
 		return err
 	}
-
 	// Unique map of repos by repo full name.
 	rs := map[string]*Repo{}
 
@@ -243,10 +252,116 @@ func QueryAll(c *Context) error {
 		return err
 	}
 	// Query contributions to subscribed repos for all stargazers.
-	if err = QueryContributions(c, sg, rs); err != nil {
+	// if err = QueryContributions(c, sg, rs); err != nil {
+	// 	return err
+	// }
+
+	commits, err := QueryCommits(c)
+	if err != nil {
 		return err
 	}
-	return SaveState(c, sg, rs)
+
+	issues, err := QueryIssues(c)
+	if err != nil {
+		return err
+	}
+
+	return SaveState(c, sg, rs, commits, issues)
+}
+
+// TODO(vikram): Add caching? Not super worried about this since there aren't
+// that many committers (yet!).
+func QueryCommits(c *Context) ([]*github.RepositoryCommit, error) {
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: c.Token})
+	tc := oauth2.NewClient(context.Background(), ts)
+
+	client := github.NewClient(tc)
+
+	splits := strings.Split(c.Repo, "/")
+	options := &github.CommitsListOptions{}
+
+	var allCommits []*github.RepositoryCommit
+	for {
+		commits, response, err := client.Repositories.ListCommits(context.Background(), splits[0], splits[1], options)
+		if err != nil {
+			return nil, err
+		}
+
+		allCommits = append(allCommits, commits...)
+		if response.NextPage == 0 {
+			break
+		}
+
+		options.Page = response.NextPage
+	}
+
+	return allCommits, nil
+}
+
+// TODO(vikram): Add caching? Not super worried about this since there aren't
+// that many issues (yet!).
+func QueryIssues(c *Context) ([]*IssueComment, error) {
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: c.Token})
+	tc := oauth2.NewClient(context.Background(), ts)
+
+	client := github.NewClient(tc)
+
+	splits := strings.Split(c.Repo, "/")
+	options := &github.IssueListByRepoOptions{State: "all"}
+
+	var allIssues []*github.Issue
+	for {
+		log.Printf("*** %d issues", len(allIssues))
+		issues, response, err := client.Issues.ListByRepo(context.Background(), splits[0], splits[1], options)
+		if err != nil {
+			return nil, err
+		}
+
+		allIssues = append(allIssues, issues...)
+		if response.NextPage == 0 {
+			break
+		}
+
+		options.Page = response.NextPage
+	}
+
+	var allComments []*IssueComment
+	for idx, issue := range allIssues {
+		log.Printf("*** fetching comments for issue %d\n", idx)
+		allComments = append(allComments, &IssueComment{
+			Author:  *issue.User.Login,
+			IssueId: *issue.Number,
+			Date:    issue.CreatedAt,
+		})
+
+		commentOpts := &github.IssueListCommentsOptions{}
+
+		for {
+			issueComments, response, err := client.Issues.ListComments(context.Background(), splits[0], splits[1], *issue.Number, commentOpts)
+			if err != nil {
+				return nil, err
+			}
+
+			for _, comment := range issueComments {
+				issueComment := &IssueComment{
+					Author:  *comment.User.Login,
+					IssueId: *issue.Number,
+					Date:    comment.CreatedAt,
+				}
+
+				allComments = append(allComments, issueComment)
+			}
+
+			if response.NextPage == 0 {
+				break
+			}
+
+			commentOpts.Page = response.NextPage
+		}
+	}
+
+	log.Printf("*** total issue comments: %d\n", len(allComments))
+	return allComments, nil
 }
 
 // QueryStargazers queries the repo's stargazers API endpoint.
@@ -445,7 +560,7 @@ func QueryStatistics(c *Context, r *Repo, authors map[string]struct{}) error {
 }
 
 // SaveState writes all queried stargazer and repo data.
-func SaveState(c *Context, sg []*Stargazer, rs map[string]*Repo) error {
+func SaveState(c *Context, sg []*Stargazer, rs map[string]*Repo, commits []*github.RepositoryCommit, issues []*IssueComment) error {
 	log.Printf("saving state")
 	filename := filepath.Join(c.CacheDir, c.Repo, "saved_state")
 	f, err := os.Create(filename)
@@ -462,30 +577,53 @@ func SaveState(c *Context, sg []*Stargazer, rs map[string]*Repo) error {
 	if err := enc.Encode(rs); err != nil {
 		return errors.New(fmt.Sprintf("failed to encode repo data: %s", err))
 	}
+	log.Printf("encoding commits data")
+	if err := enc.Encode(commits); err != nil {
+		return errors.New(fmt.Sprintf("failed to encode commits data: %s", err))
+	}
+	log.Printf("encoding issues data")
+	if err := enc.Encode(issues); err != nil {
+		return errors.New(fmt.Sprintf("failed to encode issues data: %s", err))
+	}
 	return nil
 }
 
 // LoadState reads previously saved queried stargazer and repo data.
-func LoadState(c *Context) ([]*Stargazer, map[string]*Repo, error) {
+func LoadState(c *Context) ([]*Stargazer, map[string]*Repo, []*github.RepositoryCommit, []*IssueComment, error) {
 	log.Printf("loading state")
 	filename := filepath.Join(c.CacheDir, c.Repo, "saved_state")
 	f, err := os.Open(filename)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	defer f.Close()
+
 	dec := json.NewDecoder(f)
+
 	sg := []*Stargazer{}
 	log.Printf("decoding stargazers data")
 	if err := dec.Decode(&sg); err != nil {
-		return nil, nil, errors.New(fmt.Sprintf("failed to decode stargazer data: %s", err))
+		return nil, nil, nil, nil, errors.New(fmt.Sprintf("failed to decode stargazer data: %s", err))
 	}
+
 	rs := map[string]*Repo{}
 	log.Printf("decoding repository data")
 	if err := dec.Decode(&rs); err != nil {
-		return nil, nil, errors.New(fmt.Sprintf("failed to decode repo data: %s", err))
+		return nil, nil, nil, nil, errors.New(fmt.Sprintf("failed to decode repo data: %s", err))
 	}
-	return sg, rs, nil
+	commits := []*github.RepositoryCommit{}
+	log.Printf("decoding commits data")
+	if err := dec.Decode(&commits); err != nil {
+		return nil, nil, nil, nil, errors.New(fmt.Sprintf("failed to decode committers data: %s", err))
+	}
+
+	issues := []*IssueComment{}
+	log.Printf("decoding issues data")
+	if err := dec.Decode(&issues); err != nil {
+		return nil, nil, nil, nil, errors.New(fmt.Sprintf("failed to decode committers data: %s", err))
+	}
+
+	return sg, rs, commits, issues, nil
 }
 
 func format(n int) string {
