@@ -152,7 +152,7 @@ func RunCommits(c *fetch.Context, commits []*github.RepositoryCommit) error {
 	month := 5
 
 	// Set up the CSV that we're going to write the results to.
-	f, err := createFile(c, "cumulative_commmitters.csv")
+	f, err := createFile(c, "cumulative_committers.csv")
 	if err != nil {
 		return fmt.Errorf("failed to create file: %s", err)
 	}
@@ -234,7 +234,7 @@ func RunIssues(c *fetch.Context, issues []*fetch.IssueComment) error {
 	month := 5
 
 	// Set up the CSV that we're going to write the results to.
-	f, err := createFile(c, "cumulative_commmenters.csv")
+	f, err := createFile(c, "cumulative_commenters.csv")
 	if err != nil {
 		return fmt.Errorf("failed to create file: %s", err)
 	}
