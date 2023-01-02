@@ -137,7 +137,9 @@ func RunCommits(c *fetch.Context, commits []*github.RepositoryCommit) error {
 
 		// In both maps, just blindly insert the user to the map -- even if we've
 		// inserted it before, it doesn't matter since we just mark it as true.
-		(*monthMap)[*commit.Author.Login] = true
+		if commit.Author != nil {
+			(*monthMap)[*commit.Author.Login] = true
+		}
 	}
 
 	now := time.Now()
@@ -164,7 +166,7 @@ func RunCommits(c *fetch.Context, commits []*github.RepositoryCommit) error {
 	}
 
 	allCommitters := map[string]bool{}
-	for year <= endYear && month <= endMonth {
+	for year < endYear || (year == endYear && month <= endMonth) {
 		// TODO(vikram): Is it better to keep this as a string or to store it as a
 		// datetime? The latter I think will make it hard for grouping, which is
 		// why its currently a string.
@@ -249,7 +251,7 @@ func RunIssues(c *fetch.Context, issues []*fetch.IssueComment) error {
 	// committers. If we just distill this down to pulling out the user data from
 	// the structs, this can probably go into a helper function and be deduped.
 	allCommenters := map[string]bool{}
-	for year <= endYear && month <= endMonth {
+	for year < endYear || (year == endYear && month <= endMonth) {
 		// TODO(vikram): Is it better to keep this as a string or to store it as a
 		// datetime? The latter I think will make it hard for grouping, which is
 		// why its currently a string.
